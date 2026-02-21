@@ -1,24 +1,33 @@
 import os
 import requests
 
-# Mock API representing the live, real-time state of hospital on-call rosters
-# Your hackathon UI can toggle these values to demonstrate dynamic routing
+# Live hospital state: only specialties that exist are stored.
+# specialists: count of doctors per type. specialist_patients: current patient count per type.
+# Load = specialist_patients[type] / specialists[type] (computed when needed).
 live_hospital_state = {
     "Hosp_General": {
-        "bed_capacity": 0.85, # 85% full
-        "on_call_specialists": {"Cardiology": True, "Neurology": False, "Trauma": False}
+        "bed_capacity": 0.85,
+        "specialists": {"Cardiology": 2, "Trauma": 1},  # no Neurology
+        "specialist_patients": {"Cardiology": 3, "Trauma": 0},
     },
     "Hosp_TraumaOne": {
-        "bed_capacity": 0.98, # 98% full (crowded)
-        "on_call_specialists": {"Cardiology": True, "Neurology": True, "Trauma": True}
-    }
+        "bed_capacity": 0.98,
+        "specialists": {"Cardiology": 1, "Neurology": 1, "Trauma": 2},
+        "specialist_patients": {"Cardiology": 0, "Neurology": 1, "Trauma": 5},
+    },
 }
 
 class Patient:
     def __init__(self, nlp_data, location):
-        self.acuity = nlp_data.get('acuity_level', 3)
-        self.specialty_needed = nlp_data.get('required_specialty', 'General')
+        self._nlp_data = nlp_data
+        self.acuity = nlp_data.get("acuity_level", 3)
+        self.specialty_needed = nlp_data.get("required_specialty", "General")
         self.location = location
+
+    def get_required_specialties(self):
+        """All specialty types this patient needs (for send_patient: increment load for each)."""
+        specs = self._nlp_data.get("required_specialties")
+        return list(specs) if specs else [self.specialty_needed]
 
 class Hospital:
     def __init__(self, id, location, is_trauma_center):
@@ -39,10 +48,41 @@ class Hospital:
         return live_hospital_state[self.id]["bed_capacity"]
         
     def is_specialist_available(self, required_specialty):
-        # Queries the mock live state for specific doctor availability
-        if required_specialty == 'General':
+        if required_specialty == "General":
             return True
-        return live_hospital_state[self.id]["on_call_specialists"].get(required_specialty, False)
+        return required_specialty in live_hospital_state[self.id].get("specialists", {})
+
+    def get_specialist_load(self, required_specialty):
+        """
+        Load = patients / specialists for that type. None if specialty not present.
+        """
+        if required_specialty == "General":
+            return 0
+        state = live_hospital_state[self.id]
+        specialists = state.get("specialists", {})
+        if required_specialty not in specialists or specialists[required_specialty] <= 0:
+            return None
+        num_doctors = specialists[required_specialty]
+        num_patients = state.get("specialist_patients", {}).get(required_specialty, 0)
+        return num_patients / num_doctors
+
+
+def send_patient(hospital_id, patient):
+    """
+    Record that a patient was sent to this hospital. Increments specialist_patients
+    for each specialty type the patient requires (only for types this hospital has).
+    Call this after routing so load reflects the new patient for future routing.
+    """
+    if hospital_id not in live_hospital_state:
+        return
+    state = live_hospital_state[hospital_id]
+    state.setdefault("specialist_patients", {})
+    for specialty in patient.get_required_specialties():
+        if specialty == "General":
+            continue
+        if specialty in state.get("specialists", {}):
+            state["specialist_patients"][specialty] = state["specialist_patients"].get(specialty, 0) + 1
+
 
 def score_hospital(patient, hospital, eta):
     # Base checks
@@ -57,17 +97,19 @@ def score_hospital(patient, hospital, eta):
     # Notice we invert capacity so lower % full = higher score
     score_capacity = (1.0 - hospital.get_live_capacity()) * 100 
     
-    # --- The Real-Time Specialist Check ---
+    # --- Real-Time Specialist Check (analog: doctor stress / load) ---
     score_specialty = 0
-    specialist_ready = hospital.is_specialist_available(patient.specialty_needed)
-    
-    if specialist_ready:
-        score_specialty = 5000 # The most critical factor: the doctor is there and ready
-    elif patient.acuity <= 2:
-        # If the patient is critical and the specialist IS NOT there, 
-        # heavily penalize the hospital so they aren't routed there.
-        score_specialty = -5000 
-        
+    load = hospital.get_specialist_load(patient.specialty_needed)
+
+    if load is None:
+        # Specialty not on call: heavy penalty for critical patients
+        if patient.acuity <= 2:
+            score_specialty = -5000
+    else:
+        # On call: analog bonus that decays with current patient load
+        # score = 5000 / (1 + load) → 0 patients → 5000, 1 → 2500, 2 → 1667, 5 → 833, etc.
+        score_specialty = 5000.0 / (1.0 + load)
+
     total_score = (weight_distance * score_distance) + \
                   (weight_capacity * score_capacity) + \
                   score_specialty
@@ -139,10 +181,12 @@ def get_optimal_hospital(nlp_extracted_data, current_lat, current_lon, hospital_
     scored_hospitals.sort(key=lambda x: x[0], reverse=True)
     best_score, best_hospital, best_eta = scored_hospitals[0]
 
+    load = best_hospital.get_specialist_load(patient.specialty_needed)
     return {
         "hospital_id": best_hospital.id,
         "routing_score": round(best_score, 2),
         "eta_minutes": round(best_eta, 1),
         "live_capacity": best_hospital.get_live_capacity(),
         "specialist_ready": best_hospital.is_specialist_available(patient.specialty_needed),
+        "specialist_load": load if load is not None else None,  # patients per specialist (analog stress)
     }
