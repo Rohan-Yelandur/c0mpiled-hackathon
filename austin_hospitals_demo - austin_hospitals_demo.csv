@@ -1,0 +1,11 @@
+hospital_name,latitude,longitude,total_staffed_beds,trauma_level,stroke_center_level,cardiac_cath_lab,pediatric_specialty,ed_capacity_est,available_ed_beds_sim,icu_capacity_est,available_icu_beds_sim,er_wait_min_sim,ed_diversion_sim,on_call_ed_physicians_sim,on_call_nurses_sim,ambulance_travel_time_min_sim
+Dell Seton Medical Center at The University of Texas,30.2768959,-97.7342948,240,I (Adult),Primary/Comprehensive,Yes,No,14,1,24,1,49,No,8,8,22
+St. David's North Austin Medical Center,30.4117421,-97.7067338,489,IV,Primary,Yes,Limited/Yes (NICU),28,3,46,10,54,No,4,28,21
+St. David's South Austin Medical Center,30.2257795,-97.7750175,344,II,Primary,Yes,No,21,3,34,5,59,No,4,25,7
+Ascension Seton Medical Center Austin,30.3051405,-97.7462692,399,IV,Comprehensive Level 1,Yes,No,24,2,40,3,60,No,5,31,20
+Dell Children's Medical Center,30.3036803,-97.7060583,334,I (Pediatric),Pediatric stroke capable,Yes (peds),Yes,20,2,33,5,55,No,7,25,17
+Baylor Scott & White Medical Center – Austin,30.234947,-97.8345349,25,N/A,None/Basic,No,No,12,1,4,1,53,No,4,26,9
+Heart Hospital of Austin,30.30591,-97.7410796,58,N/A,None,Yes,No,12,3,6,1,15,No,7,27,19
+Austin Emergency Center – Anderson Mill,30.4491686,-97.7878735,0,N/A (Freestanding ER),N/A (stabilize/transfer),No,No,12,1,0,0,58,No,6,23,11
+Ascension Seton Northwest Hospital,30.4052045,-97.743115,96,IV,Primary,Yes,No,12,2,10,2,54,No,6,24,17
+Ascension Seton Southwest Hospital,30.2261768,-97.8921869,28,IV,None/Basic,No/limited,No,12,1,4,1,51,No,5,20,8
