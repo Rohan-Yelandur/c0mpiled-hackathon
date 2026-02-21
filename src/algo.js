@@ -176,7 +176,7 @@ function scoreHospital(row, etaMinutes, nlpData) {
 }
 
 async function fetchEtasFromMatrix(originLat, originLon, hospitals) {
-  const apiKey = typeof process !== "undefined" && process.env?.REACT_APP_GMAPS_API_KEY;
+  const apiKey = typeof process !== "undefined" && process.env?.GMAPS_API_KEY;
   if (!apiKey) return null; // caller will use CSV column
 
   const origin = `${originLat},${originLon}`;
