@@ -3,9 +3,14 @@ import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import osmtogeojson from 'osmtogeojson';
 import centroid from '@turf/centroid';
+import bbox from '@turf/bbox';
 
 
 import { TARGET_BUILDINGS, HEIGHT_OVERRIDES, MAP_BOUNDS } from './data';
+
+// Hardcoded route endpoints
+const ROUTE_START = { name: 'DKR Memorial Stadium', coords: [-97.7325, 30.2836] };
+const ROUTE_END = { name: 'Dell Seton Medical Center', coords: [-97.7345, 30.2766] };
 
 const MapComponent = () => {
   const mapContainer = useRef(null);
@@ -14,6 +19,9 @@ const MapComponent = () => {
   const [searchTerm, setSearchTerm] = useState('');
   const [suggestions, setSuggestions] = useState([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
+  const [routeLoading, setRouteLoading] = useState(false);
+  const [routeDrawn, setRouteDrawn] = useState(false);
+  const [routeInfo, setRouteInfo] = useState(null);
 
 
 
@@ -124,6 +132,99 @@ const MapComponent = () => {
       map.current.getCanvas().style.cursor = '';
     });
   }, []);
+
+  // ---- Route Finding ----
+  const findRoute = async () => {
+    if (!map.current || routeLoading) return;
+    setRouteLoading(true);
+
+    try {
+      const [sLng, sLat] = ROUTE_START.coords;
+      const [eLng, eLat] = ROUTE_END.coords;
+
+      const url = `https://router.project-osrm.org/route/v1/driving/${sLng},${sLat};${eLng},${eLat}?overview=full&geometries=geojson`;
+      const res = await fetch(url);
+      const data = await res.json();
+
+      if (!data.routes || data.routes.length === 0) {
+        console.error('No route found');
+        setRouteLoading(false);
+        return;
+      }
+
+      const route = data.routes[0];
+      const routeGeoJSON = {
+        type: 'Feature',
+        geometry: route.geometry,
+        properties: {}
+      };
+
+      // Remove old route if exists
+      if (map.current.getSource('route-source')) {
+        map.current.getSource('route-source').setData(routeGeoJSON);
+      } else {
+        map.current.addSource('route-source', {
+          type: 'geojson',
+          data: routeGeoJSON
+        });
+
+        // Route casing (outline)
+        map.current.addLayer({
+          id: 'route-casing',
+          type: 'line',
+          source: 'route-source',
+          layout: { 'line-join': 'round', 'line-cap': 'round' },
+          paint: {
+            'line-color': '#1a56db',
+            'line-width': 10,
+            'line-opacity': 0.3
+          }
+        });
+
+        // Route line
+        map.current.addLayer({
+          id: 'route-line',
+          type: 'line',
+          source: 'route-source',
+          layout: { 'line-join': 'round', 'line-cap': 'round' },
+          paint: {
+            'line-color': '#2563eb',
+            'line-width': 5,
+            'line-opacity': 0.9
+          }
+        });
+      }
+
+      // Add start/end markers
+      new maplibregl.Marker({ color: '#16a34a' })
+        .setLngLat(ROUTE_START.coords)
+        .setPopup(new maplibregl.Popup().setHTML(`<b>${ROUTE_START.name}</b><br/>Starting Point`))
+        .addTo(map.current);
+
+      new maplibregl.Marker({ color: '#dc2626' })
+        .setLngLat(ROUTE_END.coords)
+        .setPopup(new maplibregl.Popup().setHTML(`<b>${ROUTE_END.name}</b><br/>Destination`))
+        .addTo(map.current);
+
+      // Fit bounds to route
+      const bounds = bbox(routeGeoJSON);
+      map.current.fitBounds(
+        [[bounds[0], bounds[1]], [bounds[2], bounds[3]]],
+        { padding: 80, pitch: 45, duration: 1500 }
+      );
+
+      // Store route info
+      const distKm = (route.distance / 1000).toFixed(1);
+      const durMin = Math.round(route.duration / 60);
+      setRouteInfo({ distance: distKm, duration: durMin });
+      setRouteDrawn(true);
+
+    } catch (err) {
+      console.error('Route fetch failed:', err);
+    } finally {
+      setRouteLoading(false);
+    }
+  };
 
 
 
@@ -404,21 +505,96 @@ const MapComponent = () => {
 
   return (
     <div style={{ position: 'relative', width: '100%', height: '100%' }}>
-      {/* UI Overlay */}
+      {/* Route Overlay Panel */}
       <div style={{
         position: 'absolute',
         top: 20,
         left: 20,
         zIndex: 10,
         backgroundColor: 'white',
-        padding: '15px',
-        borderRadius: '8px',
-        boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
-        maxWidth: '300px'
+        padding: '18px',
+        borderRadius: '12px',
+        boxShadow: '0 4px 20px rgba(0,0,0,0.18)',
+        maxWidth: '320px',
+        fontFamily: 'system-ui, -apple-system, sans-serif'
       }}>
-        <h2 style={{ margin: '0 0 10px 0', fontSize: '18px' }}>Austin Hospitals Map</h2>
+        <h2 style={{ margin: '0 0 14px 0', fontSize: '17px', fontWeight: 700, color: '#1e293b' }}>
+          🚑 Route to Hospital
+        </h2>
 
-        <div style={{ marginBottom: '10px', position: 'relative' }}>
+        {/* Starting Point */}
+        <div style={{
+          display: 'flex', alignItems: 'flex-start', gap: '10px',
+          padding: '10px 12px', backgroundColor: '#f0fdf4', borderRadius: '8px',
+          marginBottom: '8px', border: '1px solid #bbf7d0'
+        }}>
+          <span style={{ fontSize: '18px', lineHeight: '1.2' }}>📍</span>
+          <div>
+            <div style={{ fontSize: '11px', fontWeight: 600, color: '#16a34a', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Starting Point</div>
+            <div style={{ fontSize: '14px', fontWeight: 600, color: '#1e293b', marginTop: '2px' }}>DKR Memorial Stadium</div>
+          </div>
+        </div>
+
+        {/* Destination (shown after route is found) */}
+        {routeDrawn && (
+          <div style={{
+            display: 'flex', alignItems: 'flex-start', gap: '10px',
+            padding: '10px 12px', backgroundColor: '#fef2f2', borderRadius: '8px',
+            marginBottom: '14px', border: '1px solid #fecaca'
+          }}>
+            <span style={{ fontSize: '18px', lineHeight: '1.2' }}>🏥</span>
+            <div>
+              <div style={{ fontSize: '11px', fontWeight: 600, color: '#dc2626', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Destination</div>
+              <div style={{ fontSize: '14px', fontWeight: 600, color: '#1e293b', marginTop: '2px' }}>Dell Seton Medical Center</div>
+            </div>
+          </div>
+        )}
+
+        {/* Route Info (shown after route is drawn) */}
+        {routeInfo && (
+          <div style={{
+            display: 'flex', justifyContent: 'space-around',
+            padding: '10px', backgroundColor: '#f8fafc', borderRadius: '8px',
+            marginBottom: '14px', border: '1px solid #e2e8f0'
+          }}>
+            <div style={{ textAlign: 'center' }}>
+              <div style={{ fontSize: '18px', fontWeight: 700, color: '#2563eb' }}>{routeInfo.distance} km</div>
+              <div style={{ fontSize: '11px', color: '#64748b' }}>Distance</div>
+            </div>
+            <div style={{ width: '1px', backgroundColor: '#e2e8f0' }} />
+            <div style={{ textAlign: 'center' }}>
+              <div style={{ fontSize: '18px', fontWeight: 700, color: '#2563eb' }}>{routeInfo.duration} min</div>
+              <div style={{ fontSize: '11px', color: '#64748b' }}>Drive Time</div>
+            </div>
+          </div>
+        )}
+
+        {/* Find Route Button */}
+        <button
+          onClick={findRoute}
+          disabled={routeLoading}
+          style={{
+            width: '100%',
+            padding: '12px',
+            borderRadius: '8px',
+            border: 'none',
+            backgroundColor: routeDrawn ? '#16a34a' : '#2563eb',
+            color: 'white',
+            fontSize: '14px',
+            fontWeight: 700,
+            cursor: routeLoading ? 'wait' : 'pointer',
+            transition: 'background-color 0.2s, transform 0.1s',
+            letterSpacing: '0.5px',
+            opacity: routeLoading ? 0.7 : 1
+          }}
+          onMouseEnter={(e) => { if (!routeLoading) e.target.style.transform = 'scale(1.02)'; }}
+          onMouseLeave={(e) => { e.target.style.transform = 'scale(1)'; }}
+        >
+          {routeLoading ? '⏳ Finding Route...' : routeDrawn ? '✅ Route Found' : '🔍 FIND ROUTE'}
+        </button>
+
+        {/* Search bar */}
+        <div style={{ marginTop: '14px', position: 'relative' }}>
           <input
             type="text"
             value={searchTerm}
@@ -472,7 +648,6 @@ const MapComponent = () => {
             </ul>
           )}
         </div>
-
 
       </div>
 
