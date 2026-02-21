@@ -1,0 +1,117 @@
+AUSTIN EMS ROUTING DATASET – COLUMN EXPLANATION
+
+This dataset represents hospital infrastructure plus simulated real-time operational state for our EMS routing demo.
+
+STATIC INFRASTRUCTURE FIELDS (REAL DATA)
+
+These fields describe what the hospital is capable of.
+
+hospital_name
+Official hospital name.
+Used for display and final routing output.
+
+latitude
+longitude
+Geographic coordinates of the hospital.
+Used to calculate distance and travel time from the scene.
+Used in routing optimization.
+
+total_staffed_beds
+Total licensed/staffed inpatient beds.
+Represents overall hospital size.
+Acts as a general capacity proxy.
+Higher number = larger facility.
+
+trauma_level
+Trauma designation (Level I–IV or None).
+Level I = highest trauma capability
+Level II = high trauma capability
+Level III/IV = limited trauma services
+None = not a trauma center
+
+Used when patient requires trauma care.
+
+stroke_center_level
+Stroke capability designation.
+Used when patient is suspected stroke.
+Higher level stroke centers handle complex stroke cases (e.g., thrombectomy).
+
+cardiac_cath_lab
+Indicates whether hospital has cardiac catheterization lab.
+Used when patient is suspected STEMI (heart attack).
+If false, hospital cannot properly treat STEMI.
+
+ESTIMATED STRUCTURAL CAPACITY (SEMI-REALISTIC PROXIES)
+
+These represent estimated hospital service capacity.
+
+ed_capacity_est
+Estimated number of emergency department treatment spaces.
+Used as maximum ER handling capacity.
+Higher number = more patients can be processed simultaneously.
+
+icu_capacity_est
+Estimated number of ICU beds.
+Used when patient requires ICU-level care.
+
+SIMULATED LIVE STATE FIELDS (DYNAMIC – FOR DEMO)
+
+These simulate real-time hospital status. These are not publicly available in real time and are intentionally simulated for the demo.
+
+available_ed_beds_sim
+Number of ED beds currently available.
+Lower number = more crowded ER.
+Used to penalize overloaded hospitals.
+
+available_icu_beds_sim
+Current ICU bed availability.
+If 0, hospital cannot accept critical ICU patients.
+
+er_wait_min_sim
+Estimated ER wait time in minutes.
+Represents congestion and ambulance offload delay.
+Higher value = slower care.
+Used directly in routing score.
+
+ed_diversion_sim
+Boolean (True/False).
+If True, hospital is temporarily diverting ambulances.
+Algorithm should exclude or heavily penalize this hospital.
+
+on_call_ed_physicians_sim
+Number of emergency physicians currently on duty.
+Higher number = greater patient processing ability.
+Used as staffing strength factor.
+
+on_call_nurses_sim
+Number of nurses currently on duty.
+Impacts throughput and patient care capacity.
+
+ambulance_travel_time_min_sim
+Estimated travel time from scene to hospital (minutes).
+Primary routing variable.
+Shorter is usually better, unless hospital lacks capacity or capability.
+
+HOW THESE VARIABLES FEED THE ALGORITHM
+
+Step 1 – Hard Filters:
+Remove hospitals on diversion.
+Remove hospitals without required capability (trauma, stroke, cardiac, pediatric).
+Remove hospitals with 0 ICU beds if patient is critical.
+
+Step 2 – Score Remaining Hospitals:
+
+Example scoring logic:
+
+Score =
+(travel_time_weight × ambulance_travel_time_min_sim)
+
+(wait_weight × er_wait_min_sim)
+
+(capacity_weight × available_ed_beds_sim)
+
+(staff_weight × on_call_ed_physicians_sim)
+
+(penalty_if_low_icu)
+
+Lowest score = best hospital.
