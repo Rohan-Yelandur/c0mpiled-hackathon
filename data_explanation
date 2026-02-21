@@ -115,3 +115,20 @@ Score =
 (penalty_if_low_icu)
 
 Lowest score = best hospital.
+
+SPECIALIST COLUMNS (for load = patients/doctors)
+
+specialists_Cardiology, specialists_Trauma, specialists_Neurology
+  Number of on-call specialists in that specialty at the hospital (0 = not offered).
+
+specialist_patients_Cardiology, specialist_patients_Trauma, specialist_patients_Neurology
+  Current patient count per specialty (used with specialists_* to compute load).
+  send_patient() increments these in an overlay so future routing sees updated load.
+
+NLP required_specialty maps to these: Cardiac/STEMI/Heart → Cardiology; Trauma → Trauma; Stroke/Neuro → Neurology. Specialist load (patients ÷ doctors) is included in the score; higher load = worse. No specialists for required type = penalty for critical patients.
+
+IMPLEMENTATION (Algo.py and src/algo.js)
+- Dataset path is defined at the top of each file (CSV path). The UI does not pass hospital data; the algo loads it.
+- Hard filters: on diversion → exclude; missing required capability (trauma/stroke/cardiac/pediatric) → exclude; critical patient and 0 ICU beds → exclude.
+- Score (minimize): travel_weight×eta + wait_weight×er_wait_min_sim − capacity_weight×available_ed_beds − staff_weight×on_call_ed_physicians_sim + penalty_if_low_icu + specialist_load_weight×specialist_load (and no_specialist_penalty when required specialty has 0 doctors and acuity ≤ 2). ETA from Google Distance Matrix when API key set, else ambulance_travel_time_min_sim.
+- send_patient(hospital_id, nlp_data) updates overlay: ED/ICU deltas and specialist_patients_delta per required specialty so next routing sees reduced capacity and higher specialist load.

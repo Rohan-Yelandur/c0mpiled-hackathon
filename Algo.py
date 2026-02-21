@@ -1,192 +1,294 @@
+"""
+Hospital routing algorithm — loads hospital data from CSV, scores per data_explanation.
+get_optimal_hospital(nlp_extracted_data, current_lat, current_lon) only; dataset path defined below.
+"""
 import os
+import csv
 import requests
 
-# Live hospital state: only specialties that exist are stored.
-# specialists: count of doctors per type. specialist_patients: current patient count per type.
-# Load = specialist_patients[type] / specialists[type] (computed when needed).
-live_hospital_state = {
-    "Hosp_General": {
-        "bed_capacity": 0.85,
-        "specialists": {"Cardiology": 2, "Trauma": 1},  # no Neurology
-        "specialist_patients": {"Cardiology": 3, "Trauma": 0},
-    },
-    "Hosp_TraumaOne": {
-        "bed_capacity": 0.98,
-        "specialists": {"Cardiology": 1, "Neurology": 1, "Trauma": 2},
-        "specialist_patients": {"Cardiology": 0, "Neurology": 1, "Trauma": 5},
-    },
-}
+# Which dataset to load (path relative to this file's directory or cwd).
+HOSPITAL_DATASET_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "austin_hospitals_demo - austin_hospitals_demo.csv",
+)
 
-class Patient:
-    def __init__(self, nlp_data, location):
-        self._nlp_data = nlp_data
-        self.acuity = nlp_data.get("acuity_level", 3)
-        self.specialty_needed = nlp_data.get("required_specialty", "General")
-        self.location = location
+# Overlay when send_patient() is called: bed deltas and specialist_patients increments per hospital.
+_sent_patient_overlay = {}  # hospital_name -> {"ed_beds_delta", "icu_beds_delta", "specialist_patients_delta": { specialty: int }}
 
-    def get_required_specialties(self):
-        """All specialty types this patient needs (for send_patient: increment load for each)."""
-        specs = self._nlp_data.get("required_specialties")
-        return list(specs) if specs else [self.specialty_needed]
-
-class Hospital:
-    def __init__(self, id, location, is_trauma_center):
-        self.id = id
-        self.location = location  # (lat, lon) tuple
-        self.is_trauma_center = is_trauma_center
-
-    @property
-    def lat(self):
-        return self.location[0]
-
-    @property
-    def lon(self):
-        return self.location[1]
-
-    def get_live_capacity(self):
-        # Queries the mock live state
-        return live_hospital_state[self.id]["bed_capacity"]
-        
-    def is_specialist_available(self, required_specialty):
-        if required_specialty == "General":
-            return True
-        return required_specialty in live_hospital_state[self.id].get("specialists", {})
-
-    def get_specialist_load(self, required_specialty):
-        """
-        Load = patients / specialists for that type. None if specialty not present.
-        """
-        if required_specialty == "General":
-            return 0
-        state = live_hospital_state[self.id]
-        specialists = state.get("specialists", {})
-        if required_specialty not in specialists or specialists[required_specialty] <= 0:
-            return None
-        num_doctors = specialists[required_specialty]
-        num_patients = state.get("specialist_patients", {}).get(required_specialty, 0)
-        return num_patients / num_doctors
+SPECIALTY_NAMES = ("Cardiology", "Trauma", "Neurology")
 
 
-def send_patient(hospital_id, patient):
-    """
-    Record that a patient was sent to this hospital. Increments specialist_patients
-    for each specialty type the patient requires (only for types this hospital has).
-    Call this after routing so load reflects the new patient for future routing.
-    """
-    if hospital_id not in live_hospital_state:
-        return
-    state = live_hospital_state[hospital_id]
-    state.setdefault("specialist_patients", {})
-    for specialty in patient.get_required_specialties():
-        if specialty == "General":
+def _nlp_specialty_to_column(specialty):
+    """Map NLP required_specialty to CSV specialty name for load calculation."""
+    if not specialty or (specialty or "").lower() == "general":
+        return None
+    s = specialty.lower()
+    if "cardiac" in s or "stemi" in s or "heart" in s:
+        return "Cardiology"
+    if "trauma" in s:
+        return "Trauma"
+    if "stroke" in s or "neuro" in s:
+        return "Neurology"
+    return None
+
+
+def _get_required_specialties_from_nlp(nlp_data):
+    specs = nlp_data.get("required_specialties")
+    if isinstance(specs, (list, tuple)):
+        return [s for s in (_nlp_specialty_to_column(x) for x in specs) if s]
+    one = _nlp_specialty_to_column(nlp_data.get("required_specialty"))
+    return [one] if one else []
+
+
+def _get_specialist_load(row, specialty, hospital_name):
+    """Specialist load = (csv specialist_patients + overlay) / specialists. None if no specialists."""
+    if not specialty or specialty not in SPECIALTY_NAMES:
+        return None
+    col_doc = f"specialists_{specialty}"
+    col_pat = f"specialist_patients_{specialty}"
+    num_doctors = _num(row.get(col_doc))
+    if num_doctors <= 0:
+        return None
+    csv_patients = _num(row.get(col_pat))
+    overlay = _sent_patient_overlay.get(hospital_name, {}).get("specialist_patients_delta", {})
+    patients = max(0, csv_patients + overlay.get(specialty, 0))
+    return patients / num_doctors
+
+
+def _has_specialist_for(row, specialty, hospital_name):
+    return _get_specialist_load(row, specialty, hospital_name) is not None
+
+_cached_hospitals = None
+
+
+def _load_hospitals_from_dataset():
+    global _cached_hospitals
+    if _cached_hospitals is not None:
+        return _cached_hospitals
+    if not os.path.isfile(HOSPITAL_DATASET_PATH):
+        raise FileNotFoundError(f"Hospital dataset not found: {HOSPITAL_DATASET_PATH}")
+    with open(HOSPITAL_DATASET_PATH, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        _cached_hospitals = list(reader)
+    return _cached_hospitals
+
+
+def _num(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _has_trauma_capability(trauma_level):
+    if not trauma_level or trauma_level == "N/A":
+        return False
+    return trauma_level.upper().startswith("I")  # I, II, III, IV
+
+
+def _has_stroke_capability(stroke_level):
+    if not stroke_level:
+        return False
+    u = stroke_level.lower()
+    if "none" in u and "capable" not in u:
+        return False
+    return "primary" in u or "comprehensive" in u or "capable" in u
+
+
+def _has_cardiac_capability(cardiac_cath_lab):
+    return (cardiac_cath_lab or "").strip().lower() == "yes"
+
+
+def _has_pediatric_capability(pediatric_specialty):
+    if not pediatric_specialty:
+        return False
+    u = pediatric_specialty.lower()
+    return "yes" in u or "limited" in u or "nicu" in u
+
+
+def _specialty_requires_capability(specialty):
+    if not specialty or (specialty or "").lower() == "general":
+        return None
+    s = specialty.lower()
+    if "trauma" in s:
+        return "trauma"
+    if "stroke" in s:
+        return "stroke"
+    if "cardiac" in s or "stemi" in s or "heart" in s:
+        return "cardiac"
+    if "pediatric" in s or "peds" in s:
+        return "pediatric"
+    return None
+
+
+def _hospital_has_required_capability(row, required_cap):
+    if not required_cap:
+        return True
+    if required_cap == "trauma":
+        return _has_trauma_capability(row.get("trauma_level"))
+    if required_cap == "stroke":
+        return _has_stroke_capability(row.get("stroke_center_level"))
+    if required_cap == "cardiac":
+        return _has_cardiac_capability(row.get("cardiac_cath_lab"))
+    if required_cap == "pediatric":
+        return _has_pediatric_capability(row.get("pediatric_specialty"))
+    return True
+
+
+def _apply_hard_filters(rows, nlp_data):
+    acuity = int(nlp_data.get("acuity_level", 3))
+    required_cap = _specialty_requires_capability(nlp_data.get("required_specialty"))
+    is_critical = acuity <= 2
+    out = []
+    for row in rows:
+        if (row.get("ed_diversion_sim") or "").strip().lower() == "yes":
             continue
-        if specialty in state.get("specialists", {}):
-            state["specialist_patients"][specialty] = state["specialist_patients"].get(specialty, 0) + 1
+        if not _hospital_has_required_capability(row, required_cap):
+            continue
+        if is_critical:
+            icu_avail = _num(row.get("available_icu_beds_sim"))
+            overlay = _sent_patient_overlay.get(row["hospital_name"], {})
+            icu_avail += overlay.get("icu_beds_delta", 0)
+            if icu_avail <= 0:
+                continue
+        out.append(row)
+    return out
 
 
-def score_hospital(patient, hospital, eta):
-    # Base checks
-    if patient.acuity == 1 and eta > 30: 
-        return -9999
-        
-    urgency_multiplier = 6 - patient.acuity 
-    weight_distance = urgency_multiplier ** 3 
-    weight_capacity = (patient.acuity ** 2) * 10 
-    
-    score_distance = 100 / (eta + 1) 
-    # Notice we invert capacity so lower % full = higher score
-    score_capacity = (1.0 - hospital.get_live_capacity()) * 100 
-    
-    # --- Real-Time Specialist Check (analog: doctor stress / load) ---
-    score_specialty = 0
-    load = hospital.get_specialist_load(patient.specialty_needed)
+def _score_hospital(row, eta_minutes, nlp_data):
+    """Lower score = better. Includes specialist load (patients/doctors) for required_specialty."""
+    acuity = int(nlp_data.get("acuity_level", 3))
+    travel_weight = 1.0
+    wait_weight = 0.5
+    capacity_weight = 2.0
+    staff_weight = 0.3
+    specialist_load_weight = 20
+    no_specialist_penalty = 500
 
-    if load is None:
-        # Specialty not on call: heavy penalty for critical patients
-        if patient.acuity <= 2:
-            score_specialty = -5000
-    else:
-        # On call: analog bonus that decays with current patient load
-        # score = 5000 / (1 + load) → 0 patients → 5000, 1 → 2500, 2 → 1667, 5 → 833, etc.
-        score_specialty = 5000.0 / (1.0 + load)
+    er_wait = _num(row.get("er_wait_min_sim"))
+    ed_beds_raw = _num(row.get("available_ed_beds_sim"))
+    overlay = _sent_patient_overlay.get(row["hospital_name"], {})
+    available_ed_beds = max(0, ed_beds_raw + overlay.get("ed_beds_delta", 0))
+    physicians = _num(row.get("on_call_ed_physicians_sim"))
+    icu_avail = max(0, _num(row.get("available_icu_beds_sim")) + overlay.get("icu_beds_delta", 0))
 
-    total_score = (weight_distance * score_distance) + \
-                  (weight_capacity * score_capacity) + \
-                  score_specialty
-                  
-    return total_score
+    score = travel_weight * eta_minutes + wait_weight * er_wait
+    score -= capacity_weight * available_ed_beds
+    score -= staff_weight * physicians
+    if acuity <= 2 and icu_avail <= 1:
+        score += 50
+
+    required_specialty = _nlp_specialty_to_column(nlp_data.get("required_specialty"))
+    if required_specialty:
+        load = _get_specialist_load(row, required_specialty, row["hospital_name"])
+        if load is None:
+            if acuity <= 2:
+                score += no_specialist_penalty
+        else:
+            score += specialist_load_weight * load
+    return score
 
 
-def fetch_etas_from_matrix(origin_lat, origin_lon, hospitals):
-    """
-    Makes a SINGLE call to the Google Maps Distance Matrix API
-    for 1 origin and N destinations to prevent UI freezing.
-    Requires GMAPS_API_KEY in the environment.
-    """
+def fetch_etas_from_matrix(origin_lat, origin_lon, rows):
+    """One call to Google Distance Matrix; returns dict hospital_name -> eta minutes."""
     api_key = os.getenv("GMAPS_API_KEY")
     if not api_key:
-        # No API key: return fallback ETAs (e.g. 999) so scoring still runs
-        return {h.id: 999 for h in hospitals}
-
+        return None
     origin = f"{origin_lat},{origin_lon}"
-    destinations = "|".join([f"{h.lat},{h.lon}" for h in hospitals])
-
+    destinations = "|".join([f"{r['latitude']},{r['longitude']}" for r in rows])
     url = (
         "https://maps.googleapis.com/maps/api/distancematrix/json"
         f"?origins={origin}&destinations={destinations}&departure_time=now&key={api_key}"
     )
-
     try:
         response = requests.get(url, timeout=10).json()
     except (requests.RequestException, ValueError):
-        return {h.id: 999 for h in hospitals}
-
+        return None
     etas = {}
     if response.get("status") == "OK" and response.get("rows"):
         elements = response["rows"][0]["elements"]
-        for i, hospital in enumerate(hospitals):
-            if i >= len(elements):
-                etas[hospital.id] = 999
-                continue
-            elem = elements[i]
-            if elem.get("status") == "OK":
-                # Prefer duration_in_traffic; fallback to duration (e.g. when traffic unavailable)
-                duration = elem.get("duration_in_traffic") or elem.get("duration")
-                etas[hospital.id] = (duration["value"] / 60) if duration else 999
+        for i, row in enumerate(rows):
+            name = row["hospital_name"]
+            if i < len(elements) and elements[i].get("status") == "OK":
+                d = elements[i].get("duration_in_traffic") or elements[i].get("duration")
+                etas[name] = (d["value"] / 60) if d else 999
             else:
-                etas[hospital.id] = 999
+                etas[name] = 999
     else:
-        etas = {h.id: 999 for h in hospitals}
-
+        for row in rows:
+            etas[row["hospital_name"]] = 999
     return etas
 
 
-def get_optimal_hospital(nlp_extracted_data, current_lat, current_lon, hospital_dataset):
+def get_optimal_hospital(nlp_extracted_data, current_lat, current_lon):
     """
-    UI-facing function: given a patient (from NLP data), current location, and
-    hospital list, returns the optimal hospital using live ETAs and capacity/specialist scoring.
+    Load dataset from HOSPITAL_DATASET_PATH, apply hard filters, score (lowest = best).
+    Returns best hospital dict or None. No hospital list argument — data comes from CSV.
     """
-    if not hospital_dataset:
+    all_rows = _load_hospitals_from_dataset()
+    filtered = _apply_hard_filters(all_rows, nlp_extracted_data)
+    if not filtered:
         return None
 
-    patient = Patient(nlp_extracted_data, (current_lat, current_lon))
-    etas = fetch_etas_from_matrix(current_lat, current_lon, hospital_dataset)
+    etas_from_api = fetch_etas_from_matrix(current_lat, current_lon, filtered)
+    use_csv_travel = etas_from_api is None
 
-    scored_hospitals = []
-    for hospital in hospital_dataset:
-        eta = etas.get(hospital.id, 999)
-        score = score_hospital(patient, hospital, eta)
-        scored_hospitals.append((score, hospital, eta))
+    scored = []
+    for row in filtered:
+        if use_csv_travel:
+            eta_min = _num(row.get("ambulance_travel_time_min_sim"))
+        else:
+            eta_min = etas_from_api.get(row["hospital_name"], 999)
+        score = _score_hospital(row, eta_min, nlp_extracted_data)
+        scored.append((score, row, eta_min))
+    scored.sort(key=lambda x: x[0])
+    best_score, best_row, best_eta = scored[0]
 
-    scored_hospitals.sort(key=lambda x: x[0], reverse=True)
-    best_score, best_hospital, best_eta = scored_hospitals[0]
+    required_specialty = _nlp_specialty_to_column(nlp_extracted_data.get("required_specialty"))
+    specialist_load = (
+        _get_specialist_load(best_row, required_specialty, best_row["hospital_name"])
+        if required_specialty
+        else None
+    )
+    specialist_ready = (
+        _has_specialist_for(best_row, required_specialty, best_row["hospital_name"])
+        if required_specialty
+        else True
+    )
 
-    load = best_hospital.get_specialist_load(patient.specialty_needed)
     return {
-        "hospital_id": best_hospital.id,
+        "hospital_id": best_row["hospital_name"],
+        "hospital_name": best_row["hospital_name"],
         "routing_score": round(best_score, 2),
         "eta_minutes": round(best_eta, 1),
-        "live_capacity": best_hospital.get_live_capacity(),
-        "specialist_ready": best_hospital.is_specialist_available(patient.specialty_needed),
-        "specialist_load": load if load is not None else None,  # patients per specialist (analog stress)
+        "latitude": _num(best_row.get("latitude")),
+        "longitude": _num(best_row.get("longitude")),
+        "available_ed_beds": _num(best_row.get("available_ed_beds_sim")),
+        "available_icu_beds": _num(best_row.get("available_icu_beds_sim")),
+        "er_wait_min": _num(best_row.get("er_wait_min_sim")),
+        "trauma_level": best_row.get("trauma_level"),
+        "stroke_center_level": best_row.get("stroke_center_level"),
+        "cardiac_cath_lab": best_row.get("cardiac_cath_lab"),
+        "specialist_ready": specialist_ready,
+        "specialist_load": round(specialist_load, 2) if specialist_load is not None else None,
     }
+
+
+def send_patient(hospital_id, nlp_data):
+    """
+    Record a patient sent to this hospital. Reduces ED/ICU in overlay and increments
+    specialist_patients for each required specialty so future routing sees higher specialist load.
+    """
+    if not hospital_id:
+        return
+    _sent_patient_overlay.setdefault(
+        hospital_id,
+        {"ed_beds_delta": 0, "icu_beds_delta": 0, "specialist_patients_delta": {}},
+    )
+    _sent_patient_overlay[hospital_id]["ed_beds_delta"] -= 1
+    acuity = int(nlp_data.get("acuity_level", 3))
+    if acuity <= 2:
+        _sent_patient_overlay[hospital_id]["icu_beds_delta"] -= 1
+    delta = _sent_patient_overlay[hospital_id]["specialist_patients_delta"]
+    for specialty in _get_required_specialties_from_nlp(nlp_data):
+        delta[specialty] = delta.get(specialty, 0) + 1
