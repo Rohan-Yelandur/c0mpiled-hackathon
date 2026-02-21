@@ -1,5 +1,23 @@
 .App {
-  text-align: center;
+  display: flex;
+  height: 100vh;
+  overflow: hidden;
+  text-align: left;
+}
+
+.App-sidebar {
+  flex: 0 0 480px;
+  min-width: 380px;
+  padding: 16px;
+  overflow-y: auto;
+  background: #f8f9fa;
+  border-right: 1px solid #e0e0e0;
+}
+
+.App-main {
+  flex: 1;
+  min-width: 0;
+  position: relative;
 }
 
 .App-logo {
